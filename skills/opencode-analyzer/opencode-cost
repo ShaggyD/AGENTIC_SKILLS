@@ -188,6 +188,16 @@ get_active_days() {
     " 2>/dev/null || echo "0"
 }
 
+# Get calendar span days (first usage -> today)
+get_calendar_span_days() {
+    local db="$1"
+    sqlite3 "$db" "
+        SELECT CAST((julianday('now') - julianday(MIN(DATE(time_created / 1000, 'unixepoch')))) + 1 AS INTEGER)
+        FROM message
+        WHERE json_extract(data, '\$.tokens.input') IS NOT NULL;
+    " 2>/dev/null || echo "0"
+}
+
 # Format currency
 fmt_currency() {
     local amount="$1"
@@ -248,28 +258,21 @@ main() {
     local month_days=$(get_active_days "$DB_PATH" 30)
     local all_days=$(get_active_days "$DB_PATH" 0)
     
-    # Calculate averages
+    # Calculate averages (rolling, based on last 30 calendar days)
     local avg_daily="0"
     local avg_weekly="0"
     local avg_monthly="0"
-    
+    local avg_daily_active="0"
+
+    avg_daily=$(echo "scale=2; $month / 30" | bc)
+    avg_weekly=$(echo "scale=2; $avg_daily * 7" | bc)
+    avg_monthly="$month"
+
     if [[ "$all_days" -gt 0 ]]; then
-        avg_daily=$(echo "scale=2; $all_time / $all_days" | bc)
+        avg_daily_active=$(echo "scale=2; $all_time / $all_days" | bc)
     fi
-    
-    if [[ "$all_days" -ge 7 ]]; then
-        local num_weeks=$(echo "scale=0; $all_days / 7" | bc)
-        if [[ "$num_weeks" -gt 0 ]]; then
-            avg_weekly=$(echo "scale=2; $all_time / $num_weeks" | bc)
-        fi
-    fi
-    
-    if [[ "$all_days" -ge 30 ]]; then
-        local num_months=$(echo "scale=0; $all_days / 30" | bc)
-        if [[ "$num_months" -gt 0 ]]; then
-            avg_monthly=$(echo "scale=2; $all_time / $num_months" | bc)
-        fi
-    fi
+
+    local calendar_days=$(get_calendar_span_days "$DB_PATH")
     
     # Get projected monthly based on last 7 days if available, otherwise daily average
     local projected_monthly
@@ -293,25 +296,22 @@ main() {
     printf "${BOLD}%-20s${NC} %15s\n" "Yesterday:" "$(fmt_currency $yesterday)"
     printf "${BOLD}%-20s${NC} %15s\n" "Last 7 Days:" "$(fmt_currency $week)"
     printf "${BOLD}%-20s${NC} %15s\n" "Last 30 Days:" "$(fmt_currency $month)"
-    printf "${BOLD}%-20s${NC} %15s\n" "All Time ($all_days days):" "$(fmt_currency $all_time)"
+    printf "${BOLD}%-20s${NC} %15s\n" "All Time:" "$(fmt_currency $all_time)"
     echo ""
     
     # Averages
     echo -e "${BOLD}📊 AVERAGES${NC}"
     echo -e "${BLUE}────────────────────────────────────────────────────────────${NC}"
-    printf "${BOLD}%-20s${NC} %15s\n" "Daily Average:" "$(fmt_currency $avg_daily)"
-    if [[ "$all_days" -ge 7 ]]; then
-        printf "${BOLD}%-20s${NC} %15s\n" "Weekly Average:" "$(fmt_currency $avg_weekly)"
-    fi
-    if [[ "$all_days" -ge 30 ]]; then
-        printf "${BOLD}%-20s${NC} %15s\n" "Monthly Average:" "$(fmt_currency $avg_monthly)"
-    fi
+    printf "${BOLD}%-20s${NC} %15s\n" "Daily Average (30d):" "$(fmt_currency $avg_daily)"
+    printf "${BOLD}%-20s${NC} %15s\n" "Weekly Average (30d):" "$(fmt_currency $avg_weekly)"
+    printf "${BOLD}%-20s${NC} %15s\n" "Monthly Average (30d):" "$(fmt_currency $avg_monthly)"
+    printf "${BOLD}%-20s${NC} %15s\n" "Daily Avg (active):" "$(fmt_currency $avg_daily_active)"
     echo ""
     
     # Projection
     echo -e "${BOLD}🔮 PROJECTION${NC}"
     echo -e "${BLUE}────────────────────────────────────────────────────────────${NC}"
-    printf "${BOLD}%-20s${NC} %15s\n" "Projected Monthly:" "$(fmt_currency $projected_monthly)"
+    printf "${BOLD}%-20s${NC} %15s\n" "Projected (7d run-rate):" "$(fmt_currency $projected_monthly)"
     echo ""
     
     # Activity
@@ -320,6 +320,7 @@ main() {
     printf "%-20s %15s\n" "Active Days (Week):" "$week_days"
     printf "%-20s %15s\n" "Active Days (Month):" "$month_days"
     printf "%-20s %15s\n" "Total Active Days:" "$all_days"
+    printf "%-20s %15s\n" "Calendar Span Days:" "$calendar_days"
     echo ""
     
     # Top spenders this month
@@ -354,7 +355,7 @@ main() {
     # Sort by cost and display top 5
     sort -t'|' -k2 -nr "$tmpfile" | head -5 | while IFS='|' read -r model cost; do
         if [[ -n "$month" && $(echo "$month > 0" | bc) -eq 1 ]]; then
-            local pct=$(echo "scale=1; ($cost / $month) * 100" | bc)
+            local pct=$(echo "scale=1; ($cost * 100) / $month" | bc)
             printf "%-28s %10s %9s%%\n" "$model" "$(fmt_currency $cost)" "$pct"
         else
             printf "%-28s %10s\n" "$model" "$(fmt_currency $cost)"

@@ -30,6 +30,18 @@ cp -r skills/opencode-analyzer ~/.config/opencode/skills/
 ln -s ~/.config/opencode/skills/opencode-analyzer/opencode-cost ~/.local/bin/opencode-cost
 ```
 
+Optional plugin sources are stored in `skills/opencode-analyzer/plugins/`.
+
+## Plugin behavior (optional)
+
+When enabled in a compatible OpenCode runtime, the plugin layer is intended to:
+
+- Surface quick spend context inside OpenCode (today, yesterday, 7d, 30d)
+- Use actual costs for paid usage and OpenRouter estimates for free-model usage
+- Show rolling averages and a short top-model cost list
+
+If your runtime does not expose plugin sidebar UI, use the command path (`opencode-cost` and `/cost-report`), which is the primary supported workflow for this skill.
+
 ## Usage
 
 ```bash
@@ -48,22 +60,25 @@ Today:                         $3.80
 Yesterday:                     $2.19
 Last 7 Days:                  $16.68
 Last 30 Days:                 $16.89
-All Time (27 days):           $81.83
+All Time:                      $81.83
 
 📊 AVERAGES
 ────────────────────────────────────────────────────────────
-Daily Average:                 $3.03
-Weekly Average:               $27.27
+Daily Average (30d):           $0.60
+Weekly Average (30d):          $4.20
+Monthly Average (30d):        $18.17
+Daily Avg (active):            $3.07
 
 🔮 PROJECTION
 ────────────────────────────────────────────────────────────
-Projected Monthly:           $100.08
+Projected (7d run-rate):     $107.70
 
 📈 ACTIVITY
 ────────────────────────────────────────────────────────────
 Active Days (Week):                  5
 Active Days (Month):                 6
 Total Active Days:                  27
+Calendar Span Days:               104
 
 🔥 TOP MODELS (Last 30 Days)
 ────────────────────────────────────────────────────────────
@@ -83,15 +98,14 @@ moonshotai/kimi-k2.5             $1.58       9.0%
 - **All Time**: Complete history
 
 ### 📊 Averages
-- **Daily Average**: Average cost per active day
-- **Weekly Average**: Average cost per week (if 7+ days data)
-- **Monthly Average**: Average cost per month (if 30+ days data)
+- **Daily/Weekly/Monthly (30d)**: Rolling averages based on the last 30 calendar days
+- **Daily Avg (active)**: Average per active day across all-time usage
 
 ### 🔮 Projection
-- **Projected Monthly**: Based on last 7 days average × 30
+- **Projected (7d run-rate)**: Based on last 7 days active-day run rate × 30
 
 ### 📈 Activity
-- Active days count for each period
+- Active days plus total calendar span since first usage
 
 ### 🔥 Top Models
 - Most expensive models (by cost, not tokens)
