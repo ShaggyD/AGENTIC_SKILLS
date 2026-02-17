@@ -1,14 +1,14 @@
 # Agentic Skills
 
-CLI tools and utilities for autonomous agents. Skills define domain-specific knowledge for agents like Kimaki/OpenCode to perform tasks.
+CLI tools and utilities for autonomous agents. Skills define domain-specific knowledge for agents like [OpenCode](https://github.com/opencode-ai/opencode) to perform tasks.
 
 ## Skills
 
 ### gog
-Google Workspace CLI for Gmail, Calendar, Drive, Contacts, Sheets, and Docs.
+[Google Workspace CLI](https://gogcli.sh) for Gmail, Calendar, Drive, Contacts, Sheets, and Docs.
 
 ### kimaki-messenger
-Send prompts to Discord channels via Kimaki CLI.
+[Kimaki](https://github.com/remorses/kimaki) - Send prompts to Discord channels to control OpenCode agents.
 
 ### macos-task-scheduler
 Schedule recurring tasks on macOS using launchd plists.

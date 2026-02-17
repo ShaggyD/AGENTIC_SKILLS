@@ -8,6 +8,8 @@ metadata:
   workflow: automation
   platform: any
   requires: kimaki
+  homepage: https://kimaki.xyz
+  repository: https://github.com/remorses/kimaki
 ---
 
 ## What I do
