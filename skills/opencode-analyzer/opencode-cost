@@ -1,0 +1,372 @@
+#!/bin/bash
+#
+# opencode-cost
+# OpenCode cost analyzer with daily/weekly/monthly breakdowns
+#
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+DB_PATH=""
+
+# Find database
+detect_database() {
+    if [[ -n "$DB_PATH" ]]; then
+        echo "$DB_PATH"
+        return
+    fi
+    
+    local paths=(
+        "$HOME/.local/share/opencode/opencode.db"
+        "$HOME/Library/Application Support/opencode/opencode.db"
+    )
+    
+    for path in "${paths[@]}"; do
+        if [[ -f "$path" ]]; then
+            echo "$path"
+            return
+        fi
+    done
+    echo ""
+}
+
+# Get OpenRouter pricing for model
+get_openrouter_price() {
+    local model="$1"
+    
+    case "$model" in
+        *glm-4.6*|*glm-4*|*big-pickle*) echo "0.30:2.55" ;;
+        *kimi-k2.5*|*kimi*) echo "0.50:2.40" ;;
+        *gemini-2.5-flash*) echo "0.30:2.50" ;;
+        *gemini-2.5-pro*|*gemini-3-pro*) echo "1.25:10.00" ;;
+        *gemini-3-flash*) echo "0.50:3.00" ;;
+        *gpt-5.3*|*gpt-5.2*) echo "1.25:10.00" ;;
+        *gpt-5.1*|*gpt-5-mini*) echo "0.50:4.00" ;;
+        *minimax*) echo "0.15:0.60" ;;
+        *qwen3-coder*) echo "0.12:0.75" ;;
+        *qwen*) echo "0.40:2.40" ;;
+        *claude-opus*) echo "5.00:25.00" ;;
+        *claude-sonnet*) echo "3.00:15.00" ;;
+        *) echo "0.00:0.00" ;;
+    esac
+}
+
+# Calculate cost
+calc_cost() {
+    local input="$1"
+    local output="$2"
+    local pricing="$3"
+    
+    local input_price=$(echo "$pricing" | cut -d: -f1)
+    local output_price=$(echo "$pricing" | cut -d: -f2)
+    
+    echo "scale=2; ($input * $input_price + $output * $output_price) / 1000000" | bc
+}
+
+# Get cost for a model (actual or OpenRouter if free)
+get_model_cost() {
+    local provider="$1"
+    local model="$2"
+    local input="$3"
+    local output="$4"
+    local actual="$5"
+    
+    # Check if it's a free model/provider
+    if [[ -z "$actual" || "$actual" == "0" || "$actual" == "0.0" ]] || \
+       [[ "$model" == *"free"* ]] || \
+       [[ "$provider" == *"opencode"* ]] || \
+       [[ "$provider" == *"ollama"* ]] || \
+       [[ "$provider" == *"local"* ]] || \
+       [[ "$provider" == *"dchadwick"* ]] || \
+       [[ "$provider" == *"github-copilot"* ]]; then
+        # Use OpenRouter pricing
+        local pricing=$(get_openrouter_price "$model")
+        calc_cost "$input" "$output" "$pricing"
+    else
+        # Use actual cost
+        echo "$actual"
+    fi
+}
+
+# Calculate total cost for a time period
+calc_period_cost() {
+    local db="$1"
+    local days="$2"
+    
+    local date_filter=""
+    if [[ "$days" -gt 0 ]]; then
+        date_filter="AND time_created > (strftime('%s', 'now', '-${days} days') * 1000)"
+    fi
+    
+    local total=0
+    
+    while IFS='|' read -r provider model input output actual; do
+        [[ -z "$model" ]] && continue
+        [[ "$input" -lt 0 ]] && continue  # Skip negatives
+        
+        local cost=$(get_model_cost "$provider" "$model" "$input" "$output" "$actual")
+        total=$(echo "scale=2; $total + $cost" | bc)
+    done < <(sqlite3 "$db" "
+        SELECT 
+            json_extract(data, '\$.providerID') as provider,
+            json_extract(data, '\$.modelID') as model,
+            SUM(json_extract(data, '\$.tokens.input')) as input_tokens,
+            SUM(json_extract(data, '\$.tokens.output')) as output_tokens,
+            SUM(json_extract(data, '\$.cost')) as actual_cost
+        FROM message 
+        WHERE json_extract(data, '\$.tokens.input') IS NOT NULL
+        $date_filter
+        GROUP BY provider, model
+        HAVING input_tokens >= 0;
+    " 2>/dev/null)
+    
+    echo "$total"
+}
+
+# Calculate cost for specific date range
+calc_date_range_cost() {
+    local db="$1"
+    local start_days="$2"
+    local end_days="$3"
+    
+    local date_filter=""
+    if [[ "$end_days" -gt 0 ]]; then
+        date_filter="AND time_created > (strftime('%s', 'now', '-${start_days} days') * 1000)
+                     AND time_created <= (strftime('%s', 'now', '-${end_days} days') * 1000)"
+    else
+        date_filter="AND time_created > (strftime('%s', 'now', '-${start_days} days') * 1000)"
+    fi
+    
+    local total=0
+    
+    while IFS='|' read -r provider model input output actual; do
+        [[ -z "$model" ]] && continue
+        [[ "$input" -lt 0 ]] && continue
+        
+        local cost=$(get_model_cost "$provider" "$model" "$input" "$output" "$actual")
+        total=$(echo "scale=2; $total + $cost" | bc)
+    done < <(sqlite3 "$db" "
+        SELECT 
+            json_extract(data, '\$.providerID') as provider,
+            json_extract(data, '\$.modelID') as model,
+            SUM(json_extract(data, '\$.tokens.input')) as input_tokens,
+            SUM(json_extract(data, '\$.tokens.output')) as output_tokens,
+            SUM(json_extract(data, '\$.cost')) as actual_cost
+        FROM message 
+        WHERE json_extract(data, '\$.tokens.input') IS NOT NULL
+        $date_filter
+        GROUP BY provider, model
+        HAVING input_tokens >= 0;
+    " 2>/dev/null)
+    
+    echo "$total"
+}
+
+# Get number of active days in period
+get_active_days() {
+    local db="$1"
+    local days="$2"
+    
+    local date_filter=""
+    if [[ "$days" -gt 0 ]]; then
+        date_filter="AND time_created > (strftime('%s', 'now', '-${days} days') * 1000)"
+    fi
+    
+    sqlite3 "$db" "
+        SELECT COUNT(DISTINCT DATE(time_created / 1000, 'unixepoch'))
+        FROM message 
+        WHERE json_extract(data, '\$.tokens.input') IS NOT NULL
+        $date_filter;
+    " 2>/dev/null || echo "0"
+}
+
+# Format currency
+fmt_currency() {
+    local amount="$1"
+    if [[ -z "$amount" || "$amount" == "0" || "$amount" == "0.00" ]]; then
+        echo "FREE"
+    else
+        printf "\$%.2f" "$amount"
+    fi
+}
+
+# Main
+main() {
+    # Parse args
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --db)
+                DB_PATH="$2"
+                shift 2
+                ;;
+            -h|--help)
+                echo "Usage: opencode-cost [--db PATH]"
+                echo ""
+                echo "Shows your OpenCode spending breakdown by day/week/month"
+                echo "Uses actual costs for paid models, OpenRouter rates for free models"
+                echo ""
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1"
+                exit 1
+                ;;
+        esac
+    done
+    
+    # Find database
+    DB_PATH=$(detect_database)
+    if [[ -z "$DB_PATH" ]]; then
+        echo "Error: Could not find opencode.db"
+        exit 1
+    fi
+    
+    # Check sqlite3
+    if ! command -v sqlite3 &> /dev/null; then
+        echo "Error: sqlite3 not found"
+        exit 1
+    fi
+    
+    # Calculate all periods
+    local today=$(calc_date_range_cost "$DB_PATH" 1 0)
+    local yesterday=$(calc_date_range_cost "$DB_PATH" 2 1)
+    local week=$(calc_period_cost "$DB_PATH" 7)
+    local month=$(calc_period_cost "$DB_PATH" 30)
+    local all_time=$(calc_period_cost "$DB_PATH" 0)
+    
+    # Get active days
+    local today_days=$(get_active_days "$DB_PATH" 1)
+    local week_days=$(get_active_days "$DB_PATH" 7)
+    local month_days=$(get_active_days "$DB_PATH" 30)
+    local all_days=$(get_active_days "$DB_PATH" 0)
+    
+    # Calculate averages
+    local avg_daily="0"
+    local avg_weekly="0"
+    local avg_monthly="0"
+    
+    if [[ "$all_days" -gt 0 ]]; then
+        avg_daily=$(echo "scale=2; $all_time / $all_days" | bc)
+    fi
+    
+    if [[ "$all_days" -ge 7 ]]; then
+        local num_weeks=$(echo "scale=0; $all_days / 7" | bc)
+        if [[ "$num_weeks" -gt 0 ]]; then
+            avg_weekly=$(echo "scale=2; $all_time / $num_weeks" | bc)
+        fi
+    fi
+    
+    if [[ "$all_days" -ge 30 ]]; then
+        local num_months=$(echo "scale=0; $all_days / 30" | bc)
+        if [[ "$num_months" -gt 0 ]]; then
+            avg_monthly=$(echo "scale=2; $all_time / $num_months" | bc)
+        fi
+    fi
+    
+    # Get projected monthly based on last 7 days if available, otherwise daily average
+    local projected_monthly
+    if [[ "$week_days" -gt 0 ]]; then
+        local week_avg=$(echo "scale=2; $week / $week_days" | bc)
+        projected_monthly=$(echo "scale=2; $week_avg * 30" | bc)
+    else
+        projected_monthly=$(echo "scale=2; $avg_daily * 30" | bc)
+    fi
+    
+    # Output
+    echo ""
+    echo -e "${BOLD}💰 OPENCODE COST BREAKDOWN${NC}"
+    echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo ""
+    
+    # Time Periods
+    echo -e "${BOLD}📅 SPENDING BY PERIOD${NC}"
+    echo -e "${BLUE}────────────────────────────────────────────────────────────${NC}"
+    printf "${BOLD}%-20s${NC} %15s\n" "Today:" "$(fmt_currency $today)"
+    printf "${BOLD}%-20s${NC} %15s\n" "Yesterday:" "$(fmt_currency $yesterday)"
+    printf "${BOLD}%-20s${NC} %15s\n" "Last 7 Days:" "$(fmt_currency $week)"
+    printf "${BOLD}%-20s${NC} %15s\n" "Last 30 Days:" "$(fmt_currency $month)"
+    printf "${BOLD}%-20s${NC} %15s\n" "All Time ($all_days days):" "$(fmt_currency $all_time)"
+    echo ""
+    
+    # Averages
+    echo -e "${BOLD}📊 AVERAGES${NC}"
+    echo -e "${BLUE}────────────────────────────────────────────────────────────${NC}"
+    printf "${BOLD}%-20s${NC} %15s\n" "Daily Average:" "$(fmt_currency $avg_daily)"
+    if [[ "$all_days" -ge 7 ]]; then
+        printf "${BOLD}%-20s${NC} %15s\n" "Weekly Average:" "$(fmt_currency $avg_weekly)"
+    fi
+    if [[ "$all_days" -ge 30 ]]; then
+        printf "${BOLD}%-20s${NC} %15s\n" "Monthly Average:" "$(fmt_currency $avg_monthly)"
+    fi
+    echo ""
+    
+    # Projection
+    echo -e "${BOLD}🔮 PROJECTION${NC}"
+    echo -e "${BLUE}────────────────────────────────────────────────────────────${NC}"
+    printf "${BOLD}%-20s${NC} %15s\n" "Projected Monthly:" "$(fmt_currency $projected_monthly)"
+    echo ""
+    
+    # Activity
+    echo -e "${BOLD}📈 ACTIVITY${NC}"
+    echo -e "${BLUE}────────────────────────────────────────────────────────────${NC}"
+    printf "%-20s %15s\n" "Active Days (Week):" "$week_days"
+    printf "%-20s %15s\n" "Active Days (Month):" "$month_days"
+    printf "%-20s %15s\n" "Total Active Days:" "$all_days"
+    echo ""
+    
+    # Top spenders this month
+    echo -e "${BOLD}🔥 TOP MODELS (Last 30 Days)${NC}"
+    echo -e "${BLUE}────────────────────────────────────────────────────────────${NC}"
+    printf "${BOLD}%-28s %10s %10s${NC}\n" "MODEL" "COST" "% OF TOTAL"
+    
+    local tmpfile=$(mktemp)
+    
+    while IFS='|' read -r provider model input output actual; do
+        [[ -z "$model" ]] && continue
+        [[ "$input" -lt 0 ]] && continue
+        
+        local cost=$(get_model_cost "$provider" "$model" "$input" "$output" "$actual")
+        echo "$model|$cost"
+    done < <(sqlite3 "$DB_PATH" "
+        SELECT 
+            json_extract(data, '\$.providerID') as provider,
+            json_extract(data, '\$.modelID') as model,
+            SUM(json_extract(data, '\$.tokens.input')) as input_tokens,
+            SUM(json_extract(data, '\$.tokens.output')) as output_tokens,
+            SUM(json_extract(data, '\$.cost')) as actual_cost
+        FROM message 
+        WHERE json_extract(data, '\$.tokens.input') IS NOT NULL
+        AND time_created > (strftime('%s', 'now', '-30 days') * 1000)
+        GROUP BY provider, model
+        HAVING input_tokens >= 0
+        ORDER BY input_tokens + output_tokens DESC
+        LIMIT 10;
+    " 2>/dev/null) > "$tmpfile"
+    
+    # Sort by cost and display top 5
+    sort -t'|' -k2 -nr "$tmpfile" | head -5 | while IFS='|' read -r model cost; do
+        if [[ -n "$month" && $(echo "$month > 0" | bc) -eq 1 ]]; then
+            local pct=$(echo "scale=1; ($cost / $month) * 100" | bc)
+            printf "%-28s %10s %9s%%\n" "$model" "$(fmt_currency $cost)" "$pct"
+        else
+            printf "%-28s %10s\n" "$model" "$(fmt_currency $cost)"
+        fi
+    done
+    
+    rm -f "$tmpfile"
+    echo ""
+    
+    echo -e "${CYAN}Note:${NC} Costs use OpenRouter pricing for free models, actual costs for paid"
+    echo -e "${CYAN}Source:${NC} $DB_PATH | ${CYAN}Date:${NC} $(date '+%Y-%m-%d %H:%M')"
+    echo ""
+}
+
+main "$@"

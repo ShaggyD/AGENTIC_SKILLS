@@ -17,6 +17,7 @@ Agents are powerful but need domain knowledge to be useful. Skills provide:
 | [gog](skills/gog) | Google Workspace CLI - Gmail, Calendar, Drive, Contacts, Sheets, Docs |
 | [kimaki-messenger](skills/kimaki-messenger) | Discord bot to control OpenCode agents remotely |
 | [macos-task-scheduler](skills/macos-task-scheduler) | Schedule recurring tasks via macOS launchd |
+| [opencode-analyzer](skills/opencode-analyzer) | Analyze OpenCode token usage and estimate costs on OpenRouter |
 
 ## Quick Start
 
