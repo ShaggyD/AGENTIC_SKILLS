@@ -1,6 +1,6 @@
 ---
-name: kimaki-messenger
-description: Send prompts and manage sessions via Kimaki CLI for Discord
+name: kimaki-inject
+description: Inject prompts into existing Discord channels to trigger OpenCode sessions
 license: MIT
 compatibility: opencode
 metadata:
