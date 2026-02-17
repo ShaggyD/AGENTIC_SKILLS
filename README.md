@@ -14,6 +14,7 @@ Agents are powerful but need domain knowledge to be useful. Skills provide:
 
 | Skill | Description |
 |-------|-------------|
+| [email-processing](skills/email-processing) | Gmail inbox automation with pattern rules, AI triage, and Discord notifications |
 | [gog](skills/gog) | Google Workspace CLI - Gmail, Calendar, Drive, Contacts, Sheets, Docs |
 | [kimaki-messenger](skills/kimaki-messenger) | Discord bot to control OpenCode agents remotely |
 | [macos-task-scheduler](skills/macos-task-scheduler) | Schedule recurring tasks via macOS launchd |
