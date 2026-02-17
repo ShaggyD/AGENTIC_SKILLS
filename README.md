@@ -1,16 +1,17 @@
-# Kimaki Skills for macOS
+# Agentic Skills
 
-OpenCode skills for scheduling AI-powered tasks on macOS using Kimaki.
+CLI tools and utilities for autonomous agents. Skills define domain-specific knowledge for agents like Kimaki/OpenCode to perform tasks.
 
 ## Skills
 
+### gog
+Google Workspace CLI for Gmail, Calendar, Drive, Contacts, Sheets, and Docs.
+
+### kimaki-messenger
+Send prompts to Discord channels via Kimaki CLI.
+
 ### macos-task-scheduler
-
-Create macOS launchd scheduled tasks that trigger Kimaki/OpenCode sessions in Discord.
-
-- Schedule AI tasks (daily digests, health checks, backups)
-- Uses `--notify-only` to create notification threads you can reply to
-- Handles macOS launchd environment quirks
+Schedule recurring tasks on macOS using launchd plists.
 
 ## Usage
 
@@ -18,23 +19,20 @@ Copy a skill to your OpenCode skills directory:
 
 ```bash
 # Project-local
-cp -r skills/macos-task-scheduler ~/.config/opencode/skills/
+cp -r skills/gog ~/.config/opencode/skills/
 
 # Or Claude-compatible
-cp -r skills/macos-task-scheduler ~/.claude/skills/
+cp -r skills/gog ~/.claude/skills/
 ```
 
 Then use in OpenCode:
 ```
-skill({ name: "macos-task-scheduler" })
+skill({ name: "gog" })
 ```
-
-## Requirements
-
-- macOS (uses launchd)
-- Kimaki Discord bot
-- Node.js (via npx)
 
 ## Creating New Skills
 
-See each skill's `SKILL.md` for detailed documentation.
+Each skill is a directory containing a `SKILL.md` file with:
+- Frontmatter metadata (name, description, install instructions)
+- Usage examples and commands
+- Tips and gotchas
