@@ -9,7 +9,7 @@ metadata:
 
 # opencode-analyzer
 
-OpenCode cost analyzer with detailed daily/weekly/monthly breakdowns. Shows what you actually spent vs what it would cost on OpenRouter.
+OpenCode cost analyzer with detailed daily/weekly/monthly breakdowns. Shows what you actually spent vs what it would cost on OpenRouter, plus same-token model comparisons.
 
 ## What It Does
 
@@ -19,6 +19,7 @@ Queries your local OpenCode SQLite database to show:
 - Cost projections
 - Top models by spending
 - OpenRouter cost equivalents for free models
+- Same-token repricing across comparable model tiers
 
 ## Installation
 
@@ -104,6 +105,21 @@ moonshotai/kimi-k2.5             $1.58       9.0%
 ### 🔮 Projection
 - **Projected (7d run-rate)**: Based on last 7 days active-day run rate × 30
 
+### 🧪 Model Comparison (Same 7d Tokens)
+- Uses your exact last 7 days input/output token totals
+- Pulls current trending models from OpenRouter rankings
+- Reprices those same tokens across comparable model tiers
+- Shows 7-day repriced cost and 30-day run-rate per model
+- Helps compare options without changing usage volume
+
+### ☁️ AWS vs OpenRouter (30d from 7d usage)
+- Uses your exact last 7 days tokens and projects to 30 days
+- Compares AWS us-east on-demand rates vs OpenRouter model rates
+- Includes Claude Sonnet/Opus 4.6 (and Long Context on AWS), DeepSeek, Kimi, GLM, Qwen, and Minimax
+- Rounds displayed values up to the nearest cent for budget planning
+- Adds `ZDR` column (whether model has at least one OpenRouter ZDR endpoint)
+- Adds `MM` column (whether the model supports non-text inputs)
+
 ### 📈 Activity
 - Active days plus total calendar span since first usage
 
@@ -125,6 +141,8 @@ moonshotai/kimi-k2.5             $1.58       9.0%
 | MiniMax M2.5 | $0.15/M | $0.60/M |
 | Claude Opus | $5.00/M | $25.00/M |
 | Qwen | $0.40/M | $2.40/M |
+
+Comparison table dynamically selects current OpenRouter trending models in value, balanced, and premium classes. If live fetch fails, it falls back to a stable default set.
 
 ## Database Location
 

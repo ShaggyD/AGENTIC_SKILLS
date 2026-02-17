@@ -208,6 +208,390 @@ fmt_currency() {
     fi
 }
 
+# Format currency with fixed precision
+fmt_currency_precise() {
+    local amount="$1"
+    if [[ -z "$amount" ]]; then
+        amount="0"
+    fi
+    printf "\$%.6f" "$amount"
+}
+
+# Format currency rounded up to nearest cent
+fmt_currency_ceil() {
+    local amount="$1"
+    if [[ -z "$amount" ]]; then
+        amount="0"
+    fi
+    python3 - "$amount" <<'PY'
+from decimal import Decimal, ROUND_CEILING
+import sys
+v = Decimal(sys.argv[1])
+print(f"${v.quantize(Decimal('0.01'), rounding=ROUND_CEILING)}")
+PY
+}
+
+# Get summed token usage for the last N days
+get_period_tokens() {
+    local db="$1"
+    local days="$2"
+
+    sqlite3 "$db" "
+        SELECT
+            COALESCE(SUM(json_extract(data, '\$.tokens.input')), 0),
+            COALESCE(SUM(json_extract(data, '\$.tokens.output')), 0)
+        FROM message
+        WHERE json_extract(data, '\$.tokens.input') IS NOT NULL
+        AND time_created > (strftime('%s', 'now', '-${days} days') * 1000);
+    " 2>/dev/null || echo "0|0"
+}
+
+# Calculate projected costs using fixed model pricing for a token set
+calc_projected_cost() {
+    local input_tokens="$1"
+    local output_tokens="$2"
+    local input_price="$3"
+    local output_price="$4"
+    local period_days="$5"
+
+    local period_cost
+    local projected_30d
+    period_cost=$(echo "scale=6; ($input_tokens * $input_price + $output_tokens * $output_price) / 1000000" | bc)
+    projected_30d=$(echo "scale=6; $period_cost * 30 / $period_days" | bc)
+    echo "$period_cost|$projected_30d"
+}
+
+model_class_for_id() {
+    local model_id="$1"
+    case "$model_id" in
+        *qwen*|*deepseek*|*minimax*) echo "value" ;;
+        *glm*|*gemini-2.5-flash*|*kimi*|*grok*|*flash*) echo "balanced" ;;
+        *gpt-5*|*codex*|*gemini-3-pro*|*gemini-2.5-pro*|*claude-sonnet*|*claude-opus*|*claude-4*) echo "premium" ;;
+        *) echo "other" ;;
+    esac
+}
+
+is_comparison_candidate() {
+    local model_id="$1"
+    case "$model_id" in
+        *qwen*|*deepseek*|*minimax*|*glm*|*gemini*|*kimi*|*grok*|*gpt*|*codex*|*claude*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+build_fallback_comparison_rows() {
+    cat <<'EOF'
+qwen3-coder|0.22|1.00|value
+glm-4.7|0.30|2.55|balanced
+glm-5|0.30|2.55|balanced
+gemini-2.5-flash|0.30|2.50|balanced
+kimi-k2.5|0.50|2.40|balanced
+gpt-5.3-codex|1.25|10.00|premium
+gemini-3-pro|1.25|10.00|premium
+anthropic/claude-sonnet-4.6|3.00|15.00|premium
+anthropic/claude-opus-4.6|5.00|25.00|premium
+EOF
+}
+
+build_dynamic_comparison_rows() {
+    if ! command -v curl >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 || ! command -v rg >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local rankings_html
+    rankings_html=$(curl -fsSL -H "user-agent: opencode-cost" "https://openrouter.ai/rankings" 2>/dev/null || true)
+    [[ -z "$rankings_html" ]] && return 1
+
+    local models_json
+    models_json=$(mktemp)
+    curl -fsSL -H "accept: application/json" -H "user-agent: opencode-cost" "https://openrouter.ai/api/v1/models" > "$models_json" 2>/dev/null || {
+        rm -f "$models_json"
+        return 1
+    }
+
+    local -a ranked_ids=()
+    local seen_ids=$'\n'
+    local href id
+    while IFS= read -r href; do
+        id="${href#href=\"/}"
+        id="${id%\"}"
+
+        case "$id" in
+            docs/*|chat|models|pricing|enterprise|rankings|request-builder|about|support)
+                continue
+                ;;
+        esac
+
+        if [[ "$seen_ids" != *$'\n'"$id"$'\n'* ]]; then
+            seen_ids+="$id"$'\n'
+            ranked_ids+=("$id")
+        fi
+    done < <(printf "%s" "$rankings_html" | rg -o 'href="/[a-z0-9-]+/[a-zA-Z0-9._:-]+"')
+
+    [[ ${#ranked_ids[@]} -eq 0 ]] && {
+        rm -f "$models_json"
+        return 1
+    }
+
+    local value_quota=2
+    local balanced_quota=3
+    local premium_quota=5
+    local value_used=0
+    local balanced_used=0
+    local premium_used=0
+    local total=0
+    local max_total=8
+    local output=""
+
+    for id in "${ranked_ids[@]}"; do
+        (( total >= max_total )) && break
+        is_comparison_candidate "$id" || continue
+
+        local row
+        row=$(jq -r --arg id "$id" '.data[] | select(.id == $id or .canonical_slug == $id) | [.id, .pricing.prompt, .pricing.completion] | @tsv' "$models_json" | head -n 1)
+        [[ -z "$row" ]] && continue
+
+        local model_id input_price output_price
+        IFS=$'\t' read -r model_id input_price output_price <<< "$row"
+        [[ -z "$input_price" || -z "$output_price" || "$input_price" == "null" || "$output_price" == "null" ]] && continue
+
+        # OpenRouter API returns per-token prices; convert to per-million token rates
+        input_price=$(echo "scale=6; $input_price * 1000000" | bc)
+        output_price=$(echo "scale=6; $output_price * 1000000" | bc)
+
+        local model_class
+        model_class=$(model_class_for_id "$model_id")
+        [[ "$model_class" == "other" ]] && continue
+
+        case "$model_class" in
+            value)
+                (( value_used >= value_quota )) && continue
+                ;;
+            balanced)
+                (( balanced_used >= balanced_quota )) && continue
+                ;;
+            premium)
+                (( premium_used >= premium_quota )) && continue
+                ;;
+            *)
+                continue
+                ;;
+        esac
+
+        output+="$model_id|$input_price|$output_price|$model_class"$'\n'
+        case "$model_class" in
+            value) value_used=$(( value_used + 1 )) ;;
+            balanced) balanced_used=$(( balanced_used + 1 )) ;;
+            premium) premium_used=$(( premium_used + 1 )) ;;
+        esac
+        total=$(( total + 1 ))
+    done
+
+    # Ensure latest Claude 4.6 models are included when available.
+    local forced_id
+    for forced_id in "anthropic/claude-sonnet-4.6" "anthropic/claude-opus-4.6"; do
+        [[ "$output" == *"$forced_id|"* ]] && continue
+
+        local forced_row
+        forced_row=$(jq -r --arg id "$forced_id" '.data[] | select(.id == $id) | [.id, .pricing.prompt, .pricing.completion] | @tsv' "$models_json" | head -n 1)
+        [[ -z "$forced_row" ]] && continue
+
+        local forced_model forced_in forced_out
+        IFS=$'\t' read -r forced_model forced_in forced_out <<< "$forced_row"
+        [[ -z "$forced_in" || -z "$forced_out" || "$forced_in" == "null" || "$forced_out" == "null" ]] && continue
+
+        forced_in=$(echo "scale=6; $forced_in * 1000000" | bc)
+        forced_out=$(echo "scale=6; $forced_out * 1000000" | bc)
+
+        output+="$forced_model|$forced_in|$forced_out|premium"$'\n'
+    done
+
+    rm -f "$models_json"
+
+    local line_count
+    line_count=$(printf "%s" "$output" | rg -c '.+' 2>/dev/null || echo "0")
+    [[ -z "$output" || "$line_count" -lt 4 ]] && return 1
+    printf "%s" "$output"
+    return 0
+}
+
+# Print model comparison based on same recent token usage
+print_model_comparison() {
+    local db="$1"
+    local tokens
+    tokens=$(get_period_tokens "$db" 7)
+
+    local input_tokens="${tokens%%|*}"
+    local output_tokens="${tokens##*|}"
+
+    [[ -z "$input_tokens" ]] && input_tokens="0"
+    [[ -z "$output_tokens" ]] && output_tokens="0"
+
+    if [[ "$input_tokens" -eq 0 && "$output_tokens" -eq 0 ]]; then
+        return
+    fi
+
+    echo -e "${BOLD}🧪 MODEL COMPARISON (Same 7d Tokens)${NC}"
+    echo -e "${BLUE}────────────────────────────────────────────────────────────${NC}"
+    printf "%-20s %15s\n" "Input Tokens (7d):" "$input_tokens"
+    printf "%-20s %15s\n" "Output Tokens (7d):" "$output_tokens"
+    echo ""
+    printf "${BOLD}%-22s %10s %10s %14s${NC}\n" "MODEL" "7D COST" "30D RUN" "CLASS"
+
+    local comparison_rows=""
+    local comparison_source="OpenRouter rankings + model API"
+    if ! comparison_rows=$(build_dynamic_comparison_rows); then
+        comparison_rows=$(build_fallback_comparison_rows)
+        comparison_source="fallback model set"
+    fi
+
+    while IFS='|' read -r model input_price output_price model_class; do
+        [[ -z "$model" ]] && continue
+
+        local costs
+        local period_cost
+        local projected_30d
+        costs=$(calc_projected_cost "$input_tokens" "$output_tokens" "$input_price" "$output_price" 7)
+        period_cost="${costs%%|*}"
+        projected_30d="${costs##*|}"
+
+        printf "%-22s %10s %10s %14s\n" \
+            "$model" \
+            "$(fmt_currency_precise "$period_cost")" \
+            "$(fmt_currency_precise "$projected_30d")" \
+            "$model_class"
+    done <<< "$comparison_rows"
+
+    printf "%-20s %s\n" "Comparison Source:" "$comparison_source"
+    echo ""
+}
+
+print_aws_openrouter_projection() {
+    local db="$1"
+    local tokens
+    tokens=$(get_period_tokens "$db" 7)
+
+    local input_tokens="${tokens%%|*}"
+    local output_tokens="${tokens##*|}"
+
+    [[ -z "$input_tokens" ]] && input_tokens="0"
+    [[ -z "$output_tokens" ]] && output_tokens="0"
+
+    if [[ "$input_tokens" -eq 0 && "$output_tokens" -eq 0 ]]; then
+        return
+    fi
+
+    local models_json=""
+    local zdr_json=""
+    if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+        models_json=$(mktemp)
+        if ! curl -fsSL -H "accept: application/json" -H "user-agent: opencode-cost" "https://openrouter.ai/api/v1/models" > "$models_json" 2>/dev/null; then
+            rm -f "$models_json"
+            models_json=""
+        fi
+
+        zdr_json=$(mktemp)
+        if ! curl -fsSL -H "accept: application/json" -H "user-agent: opencode-cost" "https://openrouter.ai/api/v1/endpoints/zdr" > "$zdr_json" 2>/dev/null; then
+            rm -f "$zdr_json"
+            zdr_json=""
+        fi
+    fi
+
+    echo -e "${BOLD}☁️ AWS VS OPENROUTER (30D from 7D Usage)${NC}"
+    echo -e "${BLUE}────────────────────────────────────────────────────────────${NC}"
+    printf "%-20s %15s\n" "Input Tokens (7d):" "$input_tokens"
+    printf "%-20s %15s\n" "Output Tokens (7d):" "$output_tokens"
+    echo ""
+    printf "${BOLD}%-33s %11s %11s %11s %5s %5s${NC}\n" "MODEL" "AWS 30D" "OR 30D" "DELTA" "ZDR" "MM"
+
+    while IFS='|' read -r model aws_in aws_out or_candidates; do
+        [[ -z "$model" ]] && continue
+
+        local aws_costs aws_30d
+        aws_costs=$(calc_projected_cost "$input_tokens" "$output_tokens" "$aws_in" "$aws_out" 7)
+        aws_30d="${aws_costs##*|}"
+
+        local or_30d=""
+        local is_zdr="N/A"
+        local is_mm="N/A"
+        if [[ -n "$or_candidates" && -n "$models_json" ]]; then
+            local candidate
+            local old_ifs="$IFS"
+            IFS=','
+            for candidate in $or_candidates; do
+                local row
+                row=$(jq -r --arg id "$candidate" '.data[] | select(.id == $id) | [.pricing.prompt, .pricing.completion] | @tsv' "$models_json" | head -n 1)
+                [[ -z "$row" ]] && continue
+
+                local or_in or_out
+                IFS=$'\t' read -r or_in or_out <<< "$row"
+                [[ -z "$or_in" || -z "$or_out" || "$or_in" == "null" || "$or_out" == "null" ]] && continue
+
+                or_in=$(echo "scale=6; $or_in * 1000000" | bc)
+                or_out=$(echo "scale=6; $or_out * 1000000" | bc)
+
+                local or_costs
+                or_costs=$(calc_projected_cost "$input_tokens" "$output_tokens" "$or_in" "$or_out" 7)
+                or_30d="${or_costs##*|}"
+
+                if [[ -n "$zdr_json" ]]; then
+                    if jq -e --arg id "$candidate" '.data[] | select(.model_id == $id)' "$zdr_json" >/dev/null 2>&1; then
+                        is_zdr="Y"
+                    else
+                        is_zdr="N"
+                    fi
+                fi
+
+                if jq -e --arg id "$candidate" '.data[] | select(.id == $id) | ((.architecture.input_modalities // []) | map(ascii_downcase) | any(. != "text"))' "$models_json" >/dev/null 2>&1; then
+                    is_mm="Y"
+                else
+                    is_mm="N"
+                fi
+                break
+            done
+            IFS="$old_ifs"
+        fi
+
+        if [[ -n "$or_30d" ]]; then
+            local delta
+            delta=$(echo "scale=6; $aws_30d - $or_30d" | bc)
+            printf "%-33s %11s %11s %11s %5s %5s\n" \
+                "$model" \
+                "$(fmt_currency_ceil "$aws_30d")" \
+                "$(fmt_currency_ceil "$or_30d")" \
+                "$(fmt_currency_ceil "$delta")" \
+                "$is_zdr" \
+                "$is_mm"
+        else
+            printf "%-33s %11s %11s %11s %5s %5s\n" \
+                "$model" \
+                "$(fmt_currency_ceil "$aws_30d")" \
+                "N/A" \
+                "N/A" \
+                "$is_zdr" \
+                "$is_mm"
+        fi
+    done <<'EOF'
+Claude Sonnet 4.6|3.00|15.00|anthropic/claude-sonnet-4.6
+Claude Opus 4.6|5.00|25.00|anthropic/claude-opus-4.6
+Claude Sonnet 4.6 - Long Context|6.00|22.50|
+Claude Opus 4.6 - Long Context|10.00|37.50|
+DeepSeek v3.2|0.62|1.85|deepseek/deepseek-v3.2
+Kimi K2.5|0.60|3.00|moonshotai/kimi-k2.5
+GLM 4.7|0.60|2.20|z-ai/glm-4.7,z-ai/glm-5
+Qwen3 Coder Next|0.50|1.20|qwen/qwen3-coder-next,qwen/qwen3-coder
+Minimax M2.1|0.30|1.20|minimax/minimax-m2.1
+EOF
+
+    [[ -n "$models_json" ]] && rm -f "$models_json"
+    [[ -n "$zdr_json" ]] && rm -f "$zdr_json"
+    printf "%-20s %s\n" "Method:" "30d projected from last 7d usage"
+    printf "%-20s %s\n" "Rounding:" "ceil to nearest \$0.01"
+    printf "%-20s %s\n" "ZDR:" "Y means model has >=1 OpenRouter ZDR endpoint"
+    printf "%-20s %s\n" "MM:" "Y means supports non-text inputs"
+    echo ""
+}
+
 # Main
 main() {
     # Parse args
@@ -222,6 +606,7 @@ main() {
                 echo ""
                 echo "Shows your OpenCode spending breakdown by day/week/month"
                 echo "Uses actual costs for paid models, OpenRouter rates for free models"
+                echo "Includes same-token model comparison using last 7 days usage"
                 echo ""
                 exit 0
                 ;;
@@ -313,7 +698,13 @@ main() {
     echo -e "${BLUE}────────────────────────────────────────────────────────────${NC}"
     printf "${BOLD}%-20s${NC} %15s\n" "Projected (7d run-rate):" "$(fmt_currency $projected_monthly)"
     echo ""
-    
+
+    # Same-token model comparison
+    print_model_comparison "$DB_PATH"
+
+    # AWS vs OpenRouter projection comparison
+    print_aws_openrouter_projection "$DB_PATH"
+
     # Activity
     echo -e "${BOLD}📈 ACTIVITY${NC}"
     echo -e "${BLUE}────────────────────────────────────────────────────────────${NC}"
