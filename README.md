@@ -1,3 +1,5 @@
+> **🗄️ ARCHIVED** — This repository is no longer actively maintained. Skills `opencode-analyzer` and `macos-task-scheduler` have been migrated to [AGENT_SKILLS](ARCHIVED.md).
+
 # Agentic Skills
 
 Domain-specific knowledge for autonomous agents. Each skill gives an agent like [OpenCode](https://github.com/opencode-ai/opencode) the context and commands it needs to work with external tools.
